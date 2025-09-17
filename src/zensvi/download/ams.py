@@ -136,22 +136,16 @@ class AMSDownloader(BaseDownloader):
         """Get raw panorama IDs from the Amsterdam Street View API."""
         url = f"https://api.data.amsterdam.nl/panorama/panoramas/?near={lon},{lat}&radius={buffer}&srid=4326"
 
-        for attempt in range(10):
-            try:
-                proxy = random.choice(self._proxies)
-                user_agent = random.choice(self._user_agents)
-                headers = {"User-Agent": user_agent["user_agent"]}  # Extract the string from the dictionary
-                response = requests.get(url, proxies=proxy, headers=headers)
-                response.raise_for_status()
-                data = json.loads(response.content)
-                panoramas = data["_embedded"]["panoramas"]
-                return [item["pano_id"] for item in panoramas]
-            except Exception as e:
-                if attempt == 9:  # Last attempt
-                    warnings.warn(f"Failed to get panorama IDs after 5 attempts: {e}")
-                    return []
-                print(f"Attempt {attempt + 1} failed: {e}")
-                continue
+        headers = {"User-Agent": random.choice(self._user_agents)["user_agent"]}
+
+        try:
+            response = self._request_get(url, headers=headers, max_attempts=10, check_status=True)
+            data = response.json()
+            panoramas = data["_embedded"]["panoramas"]
+            return [item["pano_id"] for item in panoramas]
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as exc:
+            warnings.warn(f"Failed to get panorama IDs after multiple attempts: {exc}")
+            return []
 
     def _filter_pids_date(self, pid_df, start_date, end_date):
         """Filter panorama IDs by date."""
@@ -161,23 +155,24 @@ class AMSDownloader(BaseDownloader):
     def _save_image(self, pid, data, cropped):
         """Save an image to disk."""
         img_path = os.path.join(self.dir_output, f"{pid}.jpg")
+        headers = {"User-Agent": random.choice(self._user_agents)["user_agent"]}
+
         try:
-            proxy = random.choice(self._proxies)
-            headers = {"User-Agent": random.choice(self._user_agents)["user_agent"]}
-            image = Image.open(
-                BytesIO(
-                    requests.get(
-                        data["_links"]["equirectangular_medium"]["href"],
-                        proxies=proxy,
-                        headers=headers,
-                    ).content
-                )
+            response = self._request_get(
+                data["_links"]["equirectangular_medium"]["href"],
+                headers=headers,
+                max_attempts=5,
+                timeout=30,
+                check_status=True,
             )
+            image = Image.open(BytesIO(response.content))
             if cropped:
                 image = image.crop((0, 0, image.width, image.height // 2))
             image.save(img_path)
-        except Exception:
-            self.logger.log_failed_pid(pid)
+        except (requests.exceptions.RequestException, Image.UnidentifiedImageError, OSError) as exc:
+            if self.logger is not None:
+                self.logger.log_failed_pid(pid)
+            print(f"Failed to save image for PID {pid}: {exc}")
 
     def download_svi(
         self,
@@ -300,35 +295,31 @@ class AMSDownloader(BaseDownloader):
 
         def process_pid(pid, max_retries=5):
             img_url = f"https://api.data.amsterdam.nl/panorama/panoramas/{pid}/"
+            headers = {"User-Agent": random.choice(self._user_agents)["user_agent"]}
 
-            for attempt in range(max_retries):
-                try:
-                    proxy = random.choice(self._proxies)
-                    headers = {"User-Agent": random.choice(self._user_agents)["user_agent"]}
-                    response = requests.get(img_url, proxies=proxy, headers=headers)
-                    data = json.loads(response.content)
+            try:
+                response = self._request_get(img_url, headers=headers, max_attempts=max_retries, check_status=True)
+                data = response.json()
 
-                    if response.status_code == 200:
-                        if not metadata_only:
-                            self._save_image(pid, data, cropped)
+                if not metadata_only:
+                    self._save_image(pid, data, cropped)
 
-                        return {
-                            "geometry": Point(data["geometry"]["coordinates"][:2]),
-                            "lat": data["geometry"]["coordinates"][1],
-                            "lon": data["geometry"]["coordinates"][0],
-                            "pano_id": data["pano_id"],
-                            "timestamp": data["timestamp"],
-                            "mission_year": data["mission_year"],
-                            "roll": data["roll"],
-                            "pitch": data["pitch"],
-                            "heading": data["heading"],
-                        }
-                except Exception as e:
-                    if attempt == max_retries - 1:  # Last attempt
-                        print(f"Failed to download data for PID {pid} after {max_retries} attempts: {str(e)}")
-                        return None
-                    continue
-            return None
+                return {
+                    "geometry": Point(data["geometry"]["coordinates"][:2]),
+                    "lat": data["geometry"]["coordinates"][1],
+                    "lon": data["geometry"]["coordinates"][0],
+                    "pano_id": data["pano_id"],
+                    "timestamp": data["timestamp"],
+                    "mission_year": data["mission_year"],
+                    "roll": data["roll"],
+                    "pitch": data["pitch"],
+                    "heading": data["heading"],
+                }
+            except (requests.exceptions.RequestException, json.JSONDecodeError) as exc:
+                print(f"Failed to download data for PID {pid} after {max_retries} attempts: {exc}")
+                if self.logger is not None and not metadata_only:
+                    self.logger.log_failed_pid(pid)
+                return None
 
         results = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:

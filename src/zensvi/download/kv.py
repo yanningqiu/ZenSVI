@@ -214,36 +214,25 @@ class KVDownloader(BaseDownloader):
 
         def worker(row, output_dir, cropped, max_retries=5):
             url, panoid = row.url, row.id
-            user_agent = random.choice(self._user_agents)
-            proxy = random.choice(self._proxies)
+            headers = {"User-Agent": random.choice(self._user_agents)["user_agent"]}
 
             image_name = f"{panoid}.png"  # Use id for file name
             image_path = output_dir / image_name
 
-            for retry in range(max_retries):
-                try:
-                    response = requests.get(url, headers=user_agent, proxies=proxy, timeout=10)
-                    if response.status_code == 200:
-                        with open(image_path, "wb") as f:
-                            f.write(response.content)
+            try:
+                response = self._request_get(url, headers=headers, max_attempts=max_retries, timeout=10, check_status=True)
+                with open(image_path, "wb") as f:
+                    f.write(response.content)
 
-                        if cropped:
-                            img = Image.open(image_path)
-                            w, h = img.size
-                            img_cropped = img.crop((0, 0, w, h // 2))
-                            img_cropped.save(image_path)
-                        break
-                    else:
-                        if retry == max_retries - 1:  # Last retry
-                            if self.logger is not None:
-                                self.logger.log_failed_pid(panoid)
-                except Exception as e:
-                    if retry == max_retries - 1:  # Last retry
-                        if self.logger is not None:
-                            self.logger.log_failed_pid(panoid)
-                        print(f"Error: {e}")
-                    else:
-                        print(f"Retry {retry + 1}/{max_retries} failed: {e}")
+                if cropped:
+                    img = Image.open(image_path)
+                    w, h = img.size
+                    img_cropped = img.crop((0, 0, w, h // 2))
+                    img_cropped.save(image_path)
+            except (requests.exceptions.RequestException, Image.UnidentifiedImageError, OSError) as e:
+                if self.logger is not None:
+                    self.logger.log_failed_pid(panoid)
+                print(f"Error downloading panorama {panoid}: {e}")
 
         num_batches = (len(urls_df) + batch_size - 1) // batch_size
 

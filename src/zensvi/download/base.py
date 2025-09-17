@@ -1,9 +1,11 @@
 import csv
 import os
+import random
 from abc import ABC, abstractmethod
 
 import pandas as pd
 import pkg_resources
+import requests
 
 
 class BaseDownloader(ABC):
@@ -80,6 +82,76 @@ class BaseDownloader(ABC):
                 ua = {"user_agent": line.strip()}
                 UA.append(ua)
         return UA
+
+    def _request_get(
+        self,
+        url,
+        *,
+        headers=None,
+        timeout=10,
+        allow_redirects=True,
+        max_attempts=5,
+        use_proxies=True,
+        check_status=False,
+    ):
+        """Perform a GET request with retries and optional proxy fallback.
+
+        This helper ensures that a direct connection is attempted before
+        falling back to configured proxies. It retries the request up to
+        ``max_attempts`` times and raises the last encountered exception if all
+        attempts fail.
+
+        Args:
+            url (str): The URL to request.
+            headers (dict, optional): Optional request headers. Defaults to
+                None.
+            timeout (int, optional): Timeout in seconds for the request.
+                Defaults to 10.
+            allow_redirects (bool, optional): Whether to allow redirects.
+                Defaults to True.
+            max_attempts (int, optional): Maximum number of attempts before
+                giving up. Defaults to 5.
+            use_proxies (bool, optional): Whether to use configured proxies
+                after the direct attempt. Defaults to True.
+            check_status (bool, optional): If True, call ``raise_for_status``
+                on the response before returning it. Defaults to False.
+
+        Returns:
+            requests.Response: The HTTP response object.
+
+        Raises:
+            requests.exceptions.RequestException: If all attempts fail.
+        """
+
+        attempts = 0
+        last_exception = None
+        proxy_pool = self._proxies if use_proxies and self._proxies else []
+
+        while attempts < max_attempts:
+            if attempts == 0 or not proxy_pool:
+                proxy = None
+            else:
+                proxy = random.choice(proxy_pool)
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    allow_redirects=allow_redirects,
+                    proxies=proxy,
+                )
+                if check_status:
+                    response.raise_for_status()
+                return response
+            except requests.exceptions.RequestException as exc:
+                last_exception = exc
+                attempts += 1
+                continue
+
+        if last_exception is not None:
+            raise last_exception
+        raise requests.exceptions.RequestException("Failed to fetch URL")
 
     def _log_write(self, pids):
         """Write panorama IDs to log file.
